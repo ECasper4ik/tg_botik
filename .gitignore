@@ -21,3 +21,6 @@ data/cache/
 
 .DS_Store
 Thumbs.db
+
+# Личные документы (инструкции и т. п.)
+*.docx
