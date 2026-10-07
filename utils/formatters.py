@@ -121,10 +121,44 @@ class ReportFormatter:
         )
         return "\n".join(sections)
 
+    _LEVEL_LABEL = {
+        "none": "нет данных",
+        "low": "🟢 низкая",
+        "medium": "🟡 средняя",
+        "high": "🟠 высокая",
+        "critical": "🔴 критическая",
+    }
+
+    @staticmethod
+    def format_criticality(assessment: Dict) -> str:
+        """Форматирует оценку критичности утёкших данных."""
+        level = assessment.get("level", "none")
+        if level == "none":
+            return ""
+
+        lines = [f"📈 *Критичность:* {ReportFormatter._LEVEL_LABEL.get(level, level)}"]
+
+        classes = assessment.get("leaked_data_classes") or []
+        if classes:
+            shown = ", ".join(classes[:12])
+            lines.append(
+                f"🗂 *Какие данные утекли:* "
+                f"{ReportFormatter.escape_markdown(shown)}"
+            )
+
+        recs = assessment.get("recommendations") or []
+        if recs:
+            lines.append("💡 *Что делать:*")
+            for r in recs:
+                lines.append(f"• {ReportFormatter.escape_markdown(r)}")
+
+        return "\n".join(lines)
+
     @staticmethod
     def generate_self_check_report(identifier_label: str,
                                    identifier_value: str,
-                                   breaches: List[Dict]) -> str:
+                                   breaches: List[Dict],
+                                   criticality: Dict = None) -> str:
         """
         Отчёт самопроверки для подтверждённого контакта самого пользователя.
         Не содержит данных о третьих лицах.
@@ -138,7 +172,12 @@ class ReportFormatter:
         )
         sections.append(ReportFormatter.format_breach_results(breaches))
 
-        if breaches:
+        if criticality:
+            block = ReportFormatter.format_criticality(criticality)
+            if block:
+                sections.append("")
+                sections.append(block)
+        elif breaches:
             sections.append(
                 "\n💡 *Рекомендации:*\n"
                 "• смените пароли на затронутых сервисах;\n"

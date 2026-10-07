@@ -18,7 +18,11 @@ class BreachChecker:
         if not self.hibp_api_key:
             return []
         
-        url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{email}"
+        # truncateResponse=false — чтобы получить категории утёкших данных (DataClasses)
+        url = (
+            "https://haveibeenpwned.com/api/v3/breachedaccount/"
+            f"{email}?truncateResponse=false"
+        )
         headers = {
             "hibp-api-key": self.hibp_api_key,
             "User-Agent": "OSINT-Bot"

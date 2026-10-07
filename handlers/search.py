@@ -24,6 +24,7 @@ from aiogram.types import (
 )
 
 from modules.breach_check import breach_checker
+from modules.correlation import correlation_engine
 from utils.validators import validate_email, normalize_phone
 from utils.formatters import formatter
 from utils.verification import (
@@ -149,7 +150,8 @@ async def on_email_code(message: types.Message, state: FSMContext):
         await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
         return
 
-    report = formatter.generate_self_check_report("📧 Email", email, breaches)
+    criticality = correlation_engine.assess_breach_criticality(breaches)
+    report = formatter.generate_self_check_report("📧 Email", email, breaches, criticality)
     await status.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
 
 
