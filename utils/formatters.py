@@ -101,36 +101,35 @@ class ReportFormatter:
         return "\n".join(lines)
     
     @staticmethod
-    def generate_full_report(entity_data: Dict, 
-                           social_results: Dict, 
-                           breaches: List[Dict],
-                           correlation_data: Dict) -> str:
-        """Генерирует полный отчёт"""
+    def generate_self_check_report(identifier_label: str,
+                                   identifier_value: str,
+                                   breaches: List[Dict]) -> str:
+        """
+        Отчёт самопроверки для подтверждённого контакта самого пользователя.
+        Не содержит данных о третьих лицах.
+        """
         sections = []
-        
-        # Заголовок
-        sections.append("📊 *ОТЧЁТ OSINT-ПОИСКА*\n")
-        sections.append("━" * 30 + "\n")
-        
-        # Основная информация
-        sections.append(ReportFormatter.format_user_info(entity_data))
-        sections.append("\n━" * 30 + "\n")
-        
-        # Соцсети
-        sections.append(ReportFormatter.format_social_results(social_results))
-        sections.append("\n━" * 30 + "\n")
-        
-        # Утечки
+        sections.append("🛡 *ОТЧЁТ ПРОВЕРКИ ВАШИХ ДАННЫХ*\n")
+        sections.append("━" * 30)
+        sections.append(
+            f"{identifier_label}: "
+            f"`{ReportFormatter.escape_markdown(identifier_value)}` ✅ подтверждён\n"
+        )
         sections.append(ReportFormatter.format_breach_results(breaches))
-        sections.append("\n━" * 30 + "\n")
-        
-        # Корреляции
-        sections.append(ReportFormatter.format_correlation_report(correlation_data))
-        sections.append("\n━" * 30 + "\n")
-        
-        # Временная метка
-        sections.append(f"🕐 *Сгенерировано:* {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-        
+
+        if breaches:
+            sections.append(
+                "\n💡 *Рекомендации:*\n"
+                "• смените пароли на затронутых сервисах;\n"
+                "• включите двухфакторную аутентификацию;\n"
+                "• не используйте один пароль на разных сайтах."
+            )
+
+        sections.append("\n━" * 1)
+        sections.append(
+            f"🕐 *Сгенерировано:* {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+        )
         return "\n".join(sections)
+
 
 formatter = ReportFormatter()

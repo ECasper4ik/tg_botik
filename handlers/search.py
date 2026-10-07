@@ -1,239 +1,250 @@
 # handlers/search.py
+"""
+Самопроверка данных пользователя на утечки.
+
+Бот проверяет ТОЛЬКО те контакты, владение которыми пользователь подтвердил:
+  - email  — кодом, отправленным на этот адрес;
+  - телефон — кнопкой Telegram «Поделиться контактом»;
+  - пароль — проверяется по k-анонимности, на сервер уходит лишь префикс хэша.
+
+Поиск по чужим идентификаторам в этом боте не предусмотрен.
+"""
+import logging
+
 from aiogram import Router, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import asyncio
-import logging
+from aiogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
+)
 
-from modules.telegram_api import telegram_client
-from modules.social_search import social_scanner
 from modules.breach_check import breach_checker
-from modules.correlation import correlation_engine
-from utils.validators import detect_input_type, normalize_phone
+from utils.validators import validate_email, normalize_phone
 from utils.formatters import formatter
+from utils.verification import (
+    verification_manager,
+    CodeExpiredError,
+    TooManyAttemptsError,
+    ResendTooSoonError,
+)
+from utils import mailer
 
 router = Router()
 logger = logging.getLogger(__name__)
 
-# FSM состояния
-class SearchStates(StatesGroup):
-    waiting_for_input = State()
-    waiting_for_narrowing = State()
-    waiting_for_birthdate = State()
-    waiting_for_photo = State()
 
-@router.message(Command("search"))
-async def cmd_search(message: types.Message, state: FSMContext):
-    """Обработчик команды /search"""
-    args = message.text.split(maxsplit=1)
-    
-    if len(args) < 2:
-        await message.answer(
-            "🔍 *Использование:*\n"
-            "`/search @username` — поиск по юзернейму\n"
-            "`/search +79991234567` — поиск по телефону\n"
-            "`/search 123456789` — поиск по user ID\n"
-            "`/search email@example.com` — поиск по email\n\n"
-            "_Также бот предложит уточнить данные для сужения поиска._",
-            parse_mode="HTML"
-        )
-        return
-    
-    input_str = args[1].strip()
-    input_type = detect_input_type(input_str)
-    
-    if input_type == 'unknown':
-        await message.answer(
-            "❌ Не удалось определить тип ввода.\n"
-            "Пожалуйста, укажите:\n"
-            "• @username — юзернейм\n"
-            "• +79991234567 — номер телефона\n"
-            "• 123456789 — числовой ID\n"
-            "• email@example.com — email"
-        )
-        return
-    
-    status_msg = await message.answer("⏳ Выполняется поиск...")
-    
-    try:
-        entity = await telegram_client.get_entity(input_str)
-        
-        if not entity:
-            await status_msg.edit_text("❌ Пользователь не найден в Telegram")
-            return
-        
-        user_data = {
-            'user_id': entity.id,
-            'username': entity.username,
-            'first_name': entity.first_name,
-            'last_name': entity.last_name,
-            'phone': entity.phone if hasattr(entity, 'phone') else None,
-            'bio': entity.about if hasattr(entity, 'about') else None,
-            'premium': entity.premium if hasattr(entity, 'premium') else None,
-            'verified': entity.verified if hasattr(entity, 'verified') else None,
-        }
-        
-        try:
-            common_chats = await telegram_client.get_common_chats(entity.id)
-            user_data['common_chats_count'] = len(common_chats) if common_chats else 0
-        except:
-            user_data['common_chats_count'] = 0
-        
-        social_task = None
-        breach_task = None
-        
-        if entity.username:
-            social_task = asyncio.create_task(
-                social_scanner.scan_username(entity.username)
-            )
-        
-        if user_data.get('phone'):
-            breach_task = asyncio.create_task(
-                breach_checker.check_phone_breach(user_data['phone'])
-            )
-        
-        social_results = {}
-        breach_results = []
-        
-        if social_task:
-            social_results = await social_task
-        
-        if breach_task:
-            breach_results = await breach_task
-        
-        correlation_data = correlation_engine.merge_entities([user_data])
-        
-        report = formatter.generate_full_report(
-            user_data,
-            social_results,
-            breach_results,
-            correlation_data
-        )
-        
-        keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton("📅 По дате рождения", callback_data=f"narrow_birthdate_{entity.id}"),
-                    InlineKeyboardButton("👥 Связанные пользователи", callback_data=f"narrow_users_{entity.id}")
-                ],
-                [
-                    InlineKeyboardButton("📱 Поиск по другим номерам", callback_data=f"narrow_phone_{entity.id}"),
-                    InlineKeyboardButton("🌐 Расширить по соцсетям", callback_data=f"narrow_social_{entity.id}")
-                ],
-                [
-                    InlineKeyboardButton("📄 Скачать PDF", callback_data=f"pdf_{entity.id}")
-                ]
-            ]
-        )
-        
-        await status_msg.delete()
-        await message.answer(
-            report,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-            disable_web_page_preview=True
-        )
-        
-        await state.update_data({
-            'entity_id': entity.id,
-            'user_data': user_data,
-            'social_results': social_results,
-            'breach_results': breach_results
-        })
-        
-    except ValueError as e:
-        await status_msg.edit_text(f"❌ Ошибка: {str(e)}")
-    except Exception as e:
-        logger.error(f"Ошибка в search: {e}")
-        await status_msg.edit_text(f"❌ Произошла ошибка: {str(e)}")
+class CheckStates(StatesGroup):
+    waiting_for_email = State()
+    waiting_for_email_code = State()
+    waiting_for_contact = State()
+    waiting_for_password = State()
 
-@router.callback_query(F.data.startswith("narrow_"))
-async def handle_narrowing(callback: types.CallbackQuery, state: FSMContext):
-    """Обработчик уточняющих запросов"""
-    data = callback.data.split('_')
-    action = data[1]
-    entity_id = data[2]
-    
+
+def _menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📧 Проверить мой email",
+                                  callback_data="sc_email")],
+            [InlineKeyboardButton(text="📱 Проверить мой телефон",
+                                  callback_data="sc_phone")],
+            [InlineKeyboardButton(text="🔑 Проверить пароль",
+                                  callback_data="sc_password")],
+        ]
+    )
+
+
+@router.message(Command("check"))
+async def cmd_check(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "🛡 <b>Проверка ваших данных на утечки</b>\n\n"
+        "Бот проверяет только ваши собственные данные и только после "
+        "подтверждения владения ими. Выберите, что проверить:",
+        parse_mode="HTML",
+        reply_markup=_menu(),
+    )
+
+
+# ---------------------------- EMAIL ----------------------------
+
+@router.callback_query(F.data == "sc_email")
+async def sc_email(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
-    
-    if action == "birthdate":
-        await callback.message.edit_text(
-            "📅 Введите дату рождения в формате ДД.ММ.ГГГГ\n"
-            "Например: 15.03.1990"
+    await state.set_state(CheckStates.waiting_for_email)
+    await callback.message.answer(
+        "📧 Введите ваш email. На него придёт код подтверждения."
+    )
+
+
+@router.message(CheckStates.waiting_for_email)
+async def on_email(message: types.Message, state: FSMContext):
+    email = (message.text or "").strip()
+    if not validate_email(email):
+        await message.answer("❌ Это не похоже на корректный email. Попробуйте ещё раз.")
+        return
+
+    try:
+        code = verification_manager.create("email", email)
+    except ResendTooSoonError as e:
+        await message.answer(f"⏳ Код уже отправлен. Повторить можно через {int(str(e))} сек.")
+        return
+
+    try:
+        await mailer.send_code(email, code)
+    except mailer.MailerNotConfiguredError:
+        verification_manager.discard("email", email)
+        await message.answer(
+            "⚠️ Отправка писем не настроена на сервере (SMTP). "
+            "Проверка email временно недоступна."
         )
-        await state.set_state(SearchStates.waiting_for_birthdate)
-        await state.update_data({'entity_id': entity_id})
-    
-    elif action == "users":
-        await callback.message.edit_text(
-            "👥 Поиск связанных пользователей...\n"
-            "Это может занять некоторое время."
+        await state.clear()
+        return
+    except mailer.MailerError:
+        verification_manager.discard("email", email)
+        logger.exception("Не удалось отправить код на email")
+        await message.answer("❌ Не удалось отправить письмо. Проверьте адрес и попробуйте позже.")
+        return
+
+    await state.update_data(email=email)
+    await state.set_state(CheckStates.waiting_for_email_code)
+    await message.answer("✅ Код отправлен. Введите его сюда (действует 10 минут).")
+
+
+@router.message(CheckStates.waiting_for_email_code)
+async def on_email_code(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    email = data.get("email")
+    if not email:
+        await state.clear()
+        await message.answer("Сессия истекла. Начните заново: /check")
+        return
+
+    code = (message.text or "").strip()
+    try:
+        ok = verification_manager.verify("email", email, code)
+    except CodeExpiredError:
+        await state.clear()
+        await message.answer("⌛ Код истёк. Начните заново: /check")
+        return
+    except TooManyAttemptsError:
+        await state.clear()
+        await message.answer("🚫 Слишком много попыток. Начните заново: /check")
+        return
+
+    if not ok:
+        await message.answer("❌ Неверный код. Попробуйте ещё раз.")
+        return
+
+    await state.clear()
+    status = await message.answer("⏳ Проверяю email по базам утечек...")
+    try:
+        breaches = await breach_checker.check_email_hibp(email)
+    except Exception:
+        logger.exception("Ошибка проверки email в HIBP")
+        await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
+        return
+
+    report = formatter.generate_self_check_report("📧 Email", email, breaches)
+    await status.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+# ---------------------------- ТЕЛЕФОН ----------------------------
+
+@router.callback_query(F.data == "sc_phone")
+async def sc_phone(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(CheckStates.waiting_for_contact)
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="📱 Поделиться моим контактом",
+                                  request_contact=True)]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await callback.message.answer(
+        "Нажмите кнопку ниже, чтобы отправить свой номер. "
+        "Так Telegram подтверждает, что номер принадлежит вам.",
+        reply_markup=keyboard,
+    )
+
+
+@router.message(CheckStates.waiting_for_contact, F.contact)
+async def on_contact(message: types.Message, state: FSMContext):
+    contact = message.contact
+    # Принимаем только собственный контакт пользователя
+    if contact.user_id != message.from_user.id:
+        await message.answer(
+            "❌ Это чужой контакт. Можно проверить только свой номер — "
+            "используйте кнопку «Поделиться моим контактом».",
+            reply_markup=ReplyKeyboardRemove(),
         )
-        
-        try:
-            common_chats = await telegram_client.get_common_chats(int(entity_id))
-            if common_chats:
-                users = []
-                for chat in common_chats[:5]:
-                    try:
-                        participants = await telegram_client.client.get_participants(chat, limit=20)
-                        users.extend([p for p in participants if p.id != int(entity_id)])
-                    except:
-                        continue
-                
-                unique_users = {}
-                for user in users:
-                    if user.id not in unique_users:
-                        unique_users[user.id] = user
-                
-                if unique_users:
-                    msg = "👥 *Найдены связанные пользователи:*\n\n"
-                    for user in list(unique_users.values())[:10]:
-                        name = user.first_name or "Без имени"
-                        username = f"@{user.username}" if user.username else "нет username"
-                        msg += f"• {name} — {username} (ID: `{user.id}`)\n"
-                    
-                    await callback.message.edit_text(
-                        msg,
-                        parse_mode="HTML"
-                    )
-                else:
-                    await callback.message.edit_text("❌ Связанные пользователи не найдены")
-            else:
-                await callback.message.edit_text("❌ Нет общих чатов для поиска связей")
-        except Exception as e:
-            await callback.message.edit_text(f"❌ Ошибка: {str(e)}")
-    
-    elif action == "phone":
-        await callback.message.edit_text(
-            "📱 Введите номер телефона для поиска (в формате +7...):"
+        return
+
+    await state.clear()
+    phone = normalize_phone(contact.phone_number)
+    status = await message.answer("⏳ Проверяю номер...", reply_markup=ReplyKeyboardRemove())
+    try:
+        breaches = await breach_checker.check_phone_breach(phone)
+    except Exception:
+        logger.exception("Ошибка проверки телефона")
+        await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
+        return
+
+    report = formatter.generate_self_check_report("📱 Телефон", phone, breaches)
+    await status.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+@router.message(CheckStates.waiting_for_contact)
+async def on_contact_wrong(message: types.Message):
+    await message.answer("Пожалуйста, воспользуйтесь кнопкой «Поделиться моим контактом».")
+
+
+# ---------------------------- ПАРОЛЬ ----------------------------
+
+@router.callback_query(F.data == "sc_password")
+async def sc_password(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(CheckStates.waiting_for_password)
+    await callback.message.answer(
+        "🔑 Отправьте пароль, который хотите проверить.\n\n"
+        "Пароль НЕ передаётся целиком: бот считает хэш локально и отправляет "
+        "сервису лишь первые 5 символов (k-анонимность). Ваше сообщение "
+        "будет сразу удалено."
+    )
+
+
+@router.message(CheckStates.waiting_for_password)
+async def on_password(message: types.Message, state: FSMContext):
+    password = message.text or ""
+    await state.clear()
+
+    # Немедленно убираем пароль из чата
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+    if not password:
+        await message.answer("❌ Пустой пароль. Начните заново: /check")
+        return
+
+    status = await message.answer("⏳ Проверяю пароль...")
+    try:
+        count = await breach_checker.check_password(password)
+    except Exception:
+        logger.exception("Ошибка проверки пароля")
+        await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
+        return
+
+    if count > 0:
+        await status.edit_text(
+            f"⚠️ Этот пароль встречался в утечках *{count}* раз(а).\n"
+            "Срочно смените его и не используйте повторно.",
+            parse_mode="Markdown",
         )
-        await state.set_state(SearchStates.waiting_for_input)
-        await state.update_data({'entity_id': entity_id})
-    
-    elif action == "social":
-        await callback.message.edit_text(
-            "🌐 Расширенный поиск по соцсетям...\n"
-            "Это может занять некоторое время."
-        )
-        try:
-            data = await state.get_data()
-            username = data.get('user_data', {}).get('username')
-            if username:
-                results = await social_scanner.scan_username(username)
-                if results:
-                    msg = "🌐 *Найдены аккаунты:*\n\n"
-                    for platform, url in results.items():
-                        msg += f"• [{platform}]({url})\n"
-                    await callback.message.edit_text(msg, parse_mode="HTML")
-                else:
-                    await callback.message.edit_text("❌ Аккаунты не найдены")
-            else:
-                await callback.message.edit_text("❌ Нет username для поиска")
-        except Exception as e:
-            await callback.message.edit_text(f"❌ Ошибка: {str(e)}")
-    
-    elif action == "pdf":
-        await callback.message.edit_text("📄 Генерация PDF... (функция в разработке)")
+    else:
+        await status.edit_text("✅ Пароль не найден в известных утечках.")

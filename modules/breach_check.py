@@ -57,17 +57,28 @@ class BreachChecker:
         suffix = password_hash[5:].upper()
         
         url = f"https://api.pwnedpasswords.com/range/{prefix}"
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as response:
                     if response.status == 200:
                         data = await response.text()
                         for line in data.splitlines():
-                            if line.startswith(suffix):
-                                return int(line.split(':')[1])
+                            # формат строки: SUFFIX:count
+                            parts = line.split(':')
+                            if parts[0].strip().upper() == suffix:
+                                return int(parts[1])
                     return 0
-        except:
+        except aiohttp.ClientError:
             return 0
+
+    async def check_password(self, password: str) -> int:
+        """
+        Проверяет пароль через Pwned Passwords API по k-анонимности.
+        SHA-1 хэш считается локально; на сервер уходят только первые 5 символов.
+        """
+        sha1 = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+        return await self.check_password_hash(sha1)
+
 
 breach_checker = BreachChecker()

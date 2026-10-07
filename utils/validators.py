@@ -14,9 +14,10 @@ def validate_phone(phone: str) -> bool:
 
 def validate_email(email: str) -> bool:
     try:
-        validate_email_lib(email)
+        # check_deliverability=False — проверяем формат, без DNS-запроса
+        validate_email_lib(email, check_deliverability=False)
         return True
-    except:
+    except Exception:
         return False
 
 def validate_username(username: str) -> bool:
