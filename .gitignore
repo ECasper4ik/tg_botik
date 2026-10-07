@@ -3,10 +3,10 @@ config.py
 *.session
 *.session-journal
 
-pycache/
+__pycache__/
 *.py[cod]
 *.egg-info/
-venv/
+venv123/
 env/
 .venv/
 
