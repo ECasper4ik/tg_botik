@@ -286,6 +286,73 @@ class CorrelationEngine:
             "recommendations": recommendations,
         }
 
+    # Какие категории данных HIBP соответствуют атрибутам профиля субъекта.
+    # Значения — предикаты по нижнему регистру названия DataClass.
+    _ATTR_MATCHERS = {
+        "full_name": lambda d: "name" in d and "user" not in d,
+        "username": lambda d: "username" in d,
+        "city": lambda d: ("geographic" in d or "physical address" in d
+                           or "location" in d),
+        "birth_year": lambda d: "birth" in d,
+        "phone": lambda d: "phone" in d,
+        "email": lambda d: "email" in d,
+    }
+
+    _ATTR_LABELS = {
+        "full_name": "ФИО",
+        "username": "username",
+        "city": "город/адрес",
+        "birth_year": "дата рождения",
+        "phone": "телефон",
+        "email": "email",
+    }
+
+    def relevant_breaches(self, profile: Dict[str, Any],
+                          breaches: List[Dict]) -> List[Dict[str, Any]]:
+        """
+        Определяет, какие из утечек субъекта затрагивают именно его данные.
+
+        Для каждой утечки пересекает её категории (DataClasses) с атрибутами,
+        которые пользователь указал в профиле, и возвращает отсортированный
+        список (сначала самые критичные и затрагивающие больше ваших данных):
+          {name, exposed, exposed_labels, severity}
+        """
+        present = [a for a in self._ATTR_MATCHERS if profile.get(a)]
+        if not present:
+            return []
+
+        out = []
+        for breach in breaches:
+            classes = [str(dc).lower() for dc in (breach.get("DataClasses") or [])]
+            if not classes:
+                continue
+
+            exposed = []
+            matched_classes = []
+            for attr in present:
+                matcher = self._ATTR_MATCHERS[attr]
+                hits = [dc for dc in classes if matcher(dc)]
+                if hits:
+                    exposed.append(attr)
+                    matched_classes.extend(hits)
+
+            if not exposed:
+                continue
+
+            severity = _max_severity([classify_data_class(dc) for dc in matched_classes])
+            out.append({
+                "name": breach.get("Title") or breach.get("Name") or "Утечка",
+                "exposed": exposed,
+                "exposed_labels": [self._ATTR_LABELS[a] for a in exposed],
+                "severity": severity,
+            })
+
+        out.sort(
+            key=lambda b: (SEVERITY_ORDER.index(b["severity"]), len(b["exposed"])),
+            reverse=True,
+        )
+        return out
+
     def merge_entities(self, entities: list):
         merged = {
             'user_ids': set(),

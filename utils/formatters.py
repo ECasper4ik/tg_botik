@@ -74,7 +74,7 @@ class ReportFormatter:
         
         lines = ["⚠️ *Найдено в утечках:*"]
         for breach in breaches[:10]:  # Ограничиваем 10
-            name = breach.get('Name', 'Неизвестно')
+            name = breach.get('Title') or breach.get('Name') or 'Неизвестно'
             date = breach.get('BreachDate', 'Неизвестно')
             lines.append(f"• {name} ({date})")
         
@@ -155,10 +155,24 @@ class ReportFormatter:
         return "\n".join(lines)
 
     @staticmethod
+    def format_relevant_breaches(relevant: List[Dict]) -> str:
+        """Форматирует утечки, затрагивающие данные из профиля пользователя."""
+        if not relevant:
+            return ""
+        lines = ["🎯 *Эти утечки затрагивают именно ваши данные:*"]
+        for b in relevant[:10]:
+            name = ReportFormatter.escape_markdown(str(b.get("name", "Утечка")))
+            labels = ", ".join(b.get("exposed_labels", []))
+            labels = ReportFormatter.escape_markdown(labels)
+            lines.append(f"• {name} — раскрыто: {labels}")
+        return "\n".join(lines)
+
+    @staticmethod
     def generate_self_check_report(identifier_label: str,
                                    identifier_value: str,
                                    breaches: List[Dict],
-                                   criticality: Dict = None) -> str:
+                                   criticality: Dict = None,
+                                   relevant: List[Dict] = None) -> str:
         """
         Отчёт самопроверки для подтверждённого контакта самого пользователя.
         Не содержит данных о третьих лицах.
@@ -171,6 +185,12 @@ class ReportFormatter:
             f"`{ReportFormatter.escape_markdown(identifier_value)}` ✅ подтверждён\n"
         )
         sections.append(ReportFormatter.format_breach_results(breaches))
+
+        if relevant:
+            block = ReportFormatter.format_relevant_breaches(relevant)
+            if block:
+                sections.append("")
+                sections.append(block)
 
         if criticality:
             block = ReportFormatter.format_criticality(criticality)

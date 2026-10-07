@@ -140,6 +140,45 @@ def test_assess_criticality_medium_only():
     assert res["level"] == "medium"
 
 
+def test_relevant_breaches_matches_profile_attrs():
+    profile = {"full_name": "Иван Петров", "birth_year": 1990, "city": "Москва"}
+    breaches = [
+        {"Title": "SiteA", "DataClasses": ["Email addresses", "Passwords"]},
+        {"Title": "SiteB", "DataClasses": ["Names", "Dates of birth"]},
+    ]
+    res = engine.relevant_breaches(profile, breaches)
+    names = [b["name"] for b in res]
+    # SiteB раскрывает ФИО и дату рождения — он релевантен; SiteA — нет
+    assert "SiteB" in names
+    assert "SiteA" not in names
+    siteb = next(b for b in res if b["name"] == "SiteB")
+    assert "full_name" in siteb["exposed"]
+    assert "birth_year" in siteb["exposed"]
+
+
+def test_relevant_breaches_username_not_matched_as_name():
+    # "Usernames" не должен засчитываться как ФИО (full_name)
+    profile = {"full_name": "Иван Петров"}
+    breaches = [{"Title": "X", "DataClasses": ["Usernames"]}]
+    assert engine.relevant_breaches(profile, breaches) == []
+
+
+def test_relevant_breaches_empty_profile():
+    breaches = [{"Title": "X", "DataClasses": ["Names"]}]
+    assert engine.relevant_breaches({}, breaches) == []
+
+
+def test_relevant_breaches_sorted_by_severity():
+    profile = {"phone": "+70000000000", "email": "a@b.com"}
+    breaches = [
+        {"Title": "LowOne", "DataClasses": ["Email addresses"]},
+        {"Title": "HighOne", "DataClasses": ["Phone numbers"]},
+    ]
+    res = engine.relevant_breaches(profile, breaches)
+    # телефон (high) должен идти раньше email (medium)
+    assert res[0]["name"] == "HighOne"
+
+
 # небольшой помощник сравнения дробей без зависимости от pytest.approx импорта
 def pytest_approx(value, tol=1e-6):
     class _Approx(float):

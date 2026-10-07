@@ -24,9 +24,10 @@ from aiogram.types import (
 )
 
 from modules.breach_check import breach_checker
-from modules.correlation import correlation_engine
+from modules.correlation import correlation_engine, find_similar_handles
 from utils.validators import validate_email, normalize_phone
 from utils.formatters import formatter
+from utils.profile import profile_store
 from utils.verification import (
     verification_manager,
     CodeExpiredError,
@@ -44,6 +45,9 @@ class CheckStates(StatesGroup):
     waiting_for_email_code = State()
     waiting_for_contact = State()
     waiting_for_password = State()
+    waiting_profile_name = State()
+    waiting_profile_city = State()
+    waiting_profile_year = State()
 
 
 def _menu() -> InlineKeyboardMarkup:
@@ -55,8 +59,14 @@ def _menu() -> InlineKeyboardMarkup:
                                   callback_data="sc_phone")],
             [InlineKeyboardButton(text="🔑 Проверить пароль",
                                   callback_data="sc_password")],
+            [InlineKeyboardButton(text="🧩 Мой профиль (точный разбор утечек)",
+                                  callback_data="sc_profile")],
         ]
     )
+
+
+def _skip(text: str) -> bool:
+    return text.strip() in ("-", "—", "") or text.strip().lower() in ("пропустить", "skip")
 
 
 @router.message(Command("check"))
@@ -150,8 +160,15 @@ async def on_email_code(message: types.Message, state: FSMContext):
         await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
         return
 
+    # email автоматически попадает в профиль как подтверждённый атрибут
+    profile_store.set_field(message.from_user.id, "email", email)
+    profile = profile_store.get(message.from_user.id) or {}
+
     criticality = correlation_engine.assess_breach_criticality(breaches)
-    report = formatter.generate_self_check_report("📧 Email", email, breaches, criticality)
+    relevant = correlation_engine.relevant_breaches(profile, breaches)
+    report = formatter.generate_self_check_report(
+        "📧 Email", email, breaches, criticality, relevant
+    )
     await status.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
 
 
@@ -250,3 +267,87 @@ async def on_password(message: types.Message, state: FSMContext):
         )
     else:
         await status.edit_text("✅ Пароль не найден в известных утечках.")
+
+
+# ---------------------------- ПРОФИЛЬ ----------------------------
+
+@router.callback_query(F.data == "sc_profile")
+async def sc_profile(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(CheckStates.waiting_profile_name)
+    await callback.message.answer(
+        "🧩 Эти данные хранятся только в памяти и помогают показать, какие "
+        "утечки относятся именно к вам.\n\n"
+        "Введите ваши <b>ФИО</b> (или «-», чтобы пропустить):",
+        parse_mode="HTML",
+    )
+
+
+@router.message(CheckStates.waiting_profile_name)
+async def on_profile_name(message: types.Message, state: FSMContext):
+    text = message.text or ""
+    if not _skip(text):
+        profile_store.set_field(message.from_user.id, "full_name", text.strip())
+    await state.set_state(CheckStates.waiting_profile_city)
+    await message.answer("Введите ваш <b>город</b> (или «-»):", parse_mode="HTML")
+
+
+@router.message(CheckStates.waiting_profile_city)
+async def on_profile_city(message: types.Message, state: FSMContext):
+    text = message.text or ""
+    if not _skip(text):
+        profile_store.set_field(message.from_user.id, "city", text.strip())
+    await state.set_state(CheckStates.waiting_profile_year)
+    await message.answer("Введите ваш <b>год рождения</b> (например 1990, или «-»):",
+                         parse_mode="HTML")
+
+
+@router.message(CheckStates.waiting_profile_year)
+async def on_profile_year(message: types.Message, state: FSMContext):
+    text = (message.text or "").strip()
+    if not _skip(text):
+        if text.isdigit() and 1900 <= int(text) <= 2025:
+            profile_store.set_field(message.from_user.id, "birth_year", int(text))
+        else:
+            await message.answer("❌ Год должен быть числом вида 1990. Попробуйте ещё раз или «-».")
+            return
+    await state.clear()
+    prof = profile_store.get(message.from_user.id) or {}
+    saved = ", ".join(k for k in ("full_name", "city", "birth_year") if prof.get(k))
+    await message.answer(
+        "✅ Профиль сохранён"
+        + (f" ({saved})" if saved else " (пусто)")
+        + ".\n\nТеперь при проверке email (/check → 📧) бот покажет, какие "
+        "утечки затрагивают именно ваши данные."
+    )
+
+
+# ---------------------------- /compare ----------------------------
+
+@router.message(Command("compare"))
+async def cmd_compare(message: types.Message):
+    """
+    Сравнение никнеймов на похожесть (обе стороны вводите вы).
+    Использование: /compare мой_ник ник1 ник2 ...
+    """
+    parts = (message.text or "").split()
+    if len(parts) < 3:
+        await message.answer(
+            "Использование: <code>/compare мой_ник ник1 ник2 ...</code>\n"
+            "Покажу, какие из перечисленных ников похожи на ваш "
+            "(удобно, чтобы связать свои разные алиасы).",
+            parse_mode="HTML",
+        )
+        return
+
+    target = parts[1]
+    candidates = parts[2:]
+    matches = find_similar_handles(target, candidates, threshold=0.6)
+    if not matches:
+        await message.answer(f"Похожих на «{target}» ников не найдено.")
+        return
+
+    lines = [f"🔎 Похожие на «{target}»:"]
+    for m in matches:
+        lines.append(f"• {m['handle']} — {int(m['score'] * 100)}%")
+    await message.answer("\n".join(lines))
