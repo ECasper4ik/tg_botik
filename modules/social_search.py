@@ -37,47 +37,74 @@ class SocialMediaScanner:
         'Twitch': 'https://www.twitch.tv/{username}',
     }
     
-    def __init__(self):
-        self.timeout = aiohttp.ClientTimeout(total=5)
-    
-    async def check_platform(self, session: aiohttp.ClientSession, 
-                            platform: str, url_template: str, 
-                            username: str) -> Optional[str]:
-        """Проверяет существование аккаунта на одной платформе"""
+    # Браузерный User-Agent снижает число ложных блокировок/404 от площадок
+    HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/122.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    def __init__(self, timeout: int = 7, concurrency: int = 10):
+        self.timeout = aiohttp.ClientTimeout(total=timeout)
+        self._semaphore = asyncio.Semaphore(concurrency)
+
+    async def check_platform(self, session: aiohttp.ClientSession,
+                             platform: str, url_template: str,
+                             username: str) -> Optional[str]:
+        """Проверяет существование аккаунта на одной платформе."""
         url = url_template.format(username=username)
-        try:
-            async with session.head(url, timeout=self.timeout, allow_redirects=True) as response:
-                if response.status == 200:
-                    return url
-                elif response.status == 404:
-                    return None
-                else:
-                    # Некоторые платформы возвращают 302/301 при существовании
-                    if response.status in [301, 302]:
+        async with self._semaphore:
+            try:
+                # GET надёжнее HEAD: часть площадок не отвечает на HEAD корректно
+                async with session.get(
+                    url,
+                    timeout=self.timeout,
+                    allow_redirects=True,
+                    headers=self.HEADERS,
+                ) as response:
+                    # 200 на конечном URL — аккаунт, скорее всего, существует.
+                    # Редирект на страницу логина/главную обычно означает «нет».
+                    if response.status == 200 and self._looks_like_profile(response, url):
                         return url
                     return None
-        except:
-            return None
-    
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                return None
+
+    @staticmethod
+    def _looks_like_profile(response: aiohttp.ClientResponse, requested_url: str) -> bool:
+        """Грубая эвристика: финальный URL не ушёл на /login, /404 и т. п."""
+        final = str(response.url).rstrip("/").lower()
+        bad_markers = ("/login", "/signup", "/404", "/error", "not-found")
+        return not any(m in final for m in bad_markers)
+
     async def scan_username(self, username: str) -> Dict[str, str]:
         """
-        Сканирует все платформы и возвращает словарь {платформа: url}
+        Сканирует все платформы и возвращает словарь {платформа: url}.
+
+        ВНИМАНИЕ: запускать только для собственного ника субъекта и только
+        после его явного согласия (см. handlers/consent.py). Результат —
+        best-effort: часть площадок защищена от автоматических проверок,
+        поэтому возможны ложные пропуски.
         """
-        results = {}
+        username = username.lstrip("@").strip()
+        results: Dict[str, str] = {}
         async with aiohttp.ClientSession() as session:
-            tasks = []
-            for platform, url_template in self.PLATFORMS.items():
-                task = self.check_platform(session, platform, url_template, username)
-                tasks.append((platform, task))
-            
-            for platform, task in tasks:
+            tasks = {
+                platform: asyncio.create_task(
+                    self.check_platform(session, platform, tpl, username)
+                )
+                for platform, tpl in self.PLATFORMS.items()
+            }
+            for platform, task in tasks.items():
                 try:
                     url = await task
                     if url:
                         results[platform] = url
-                except:
+                except Exception:
                     continue
-        
         return results
     
     async def search_by_email(self, email: str) -> Dict[str, str]:

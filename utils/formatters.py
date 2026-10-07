@@ -101,6 +101,27 @@ class ReportFormatter:
         return "\n".join(lines)
     
     @staticmethod
+    def generate_footprint_report(username: str,
+                                  social_results: Dict[str, str]) -> str:
+        """
+        Отчёт о цифровом следе субъекта, построенный ПОСЛЕ его явного согласия.
+        Содержит только публичные аккаунты самого субъекта.
+        """
+        sections = []
+        sections.append("🌐 *ОТЧЁТ О ЦИФРОВОМ СЛЕДЕ*")
+        sections.append(
+            f"Субъект: @{ReportFormatter.escape_markdown(username.lstrip('@'))} "
+            "✅ проверка выполнена с его согласия"
+        )
+        sections.append("━" * 30)
+        sections.append(ReportFormatter.format_social_results(social_results))
+        sections.append("━" * 30)
+        sections.append(
+            f"🕐 *Сгенерировано:* {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}"
+        )
+        return "\n".join(sections)
+
+    @staticmethod
     def generate_self_check_report(identifier_label: str,
                                    identifier_value: str,
                                    breaches: List[Dict]) -> str:

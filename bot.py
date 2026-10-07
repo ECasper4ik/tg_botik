@@ -9,6 +9,7 @@ from config import config
 from handlers.start import router as start_router
 from handlers.search import router as search_router
 from handlers.callback import router as callback_router
+from handlers.consent import router as consent_router
 
 # Настройка логирования
 logging.basicConfig(
@@ -27,6 +28,7 @@ async def main():
     # Подключаем роутеры
     dp.include_router(start_router)
     dp.include_router(search_router)
+    dp.include_router(consent_router)
     dp.include_router(callback_router)
     
     logger.info("🚀 Бот запущен!")
