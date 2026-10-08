@@ -22,6 +22,7 @@ from aiogram.types import (
     KeyboardButton,
     ReplyKeyboardRemove,
 )
+from aiogram.exceptions import TelegramBadRequest
 
 from modules.breach_check import breach_checker
 from modules.correlation import correlation_engine, find_similar_handles
@@ -67,6 +68,17 @@ def _menu() -> InlineKeyboardMarkup:
 
 def _skip(text: str) -> bool:
     return text.strip() in ("-", "—", "") or text.strip().lower() in ("пропустить", "skip")
+
+
+async def _edit_or_answer(status: types.Message, text: str, **kwargs) -> None:
+    """
+    Пытается отредактировать статус-сообщение; если Telegram не разрешает
+    (например, у сообщения была reply-клавиатура), отправляет новое.
+    """
+    try:
+        await status.edit_text(text, **kwargs)
+    except TelegramBadRequest:
+        await status.answer(text, **kwargs)
 
 
 @router.message(Command("check"))
@@ -157,7 +169,7 @@ async def on_email_code(message: types.Message, state: FSMContext):
         breaches = await breach_checker.check_email_hibp(email)
     except Exception:
         logger.exception("Ошибка проверки email в HIBP")
-        await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
+        await _edit_or_answer(status, "❌ Сервис проверки недоступен, попробуйте позже.")
         return
 
     # email автоматически попадает в профиль как подтверждённый атрибут
@@ -169,7 +181,7 @@ async def on_email_code(message: types.Message, state: FSMContext):
     report = formatter.generate_self_check_report(
         "📧 Email", email, breaches, criticality, relevant
     )
-    await status.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
+    await _edit_or_answer(status, report, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 # ---------------------------- ТЕЛЕФОН ----------------------------
@@ -205,16 +217,19 @@ async def on_contact(message: types.Message, state: FSMContext):
 
     await state.clear()
     phone = normalize_phone(contact.phone_number)
-    status = await message.answer("⏳ Проверяю номер...", reply_markup=ReplyKeyboardRemove())
+    # Убираем reply-клавиатуру отдельным сообщением: сообщения с reply-клавиатурой
+    # нельзя редактировать, поэтому статус отправляем обычным сообщением.
+    await message.answer("📱 Номер получен.", reply_markup=ReplyKeyboardRemove())
+    status = await message.answer("⏳ Проверяю номер...")
     try:
         breaches = await breach_checker.check_phone_breach(phone)
     except Exception:
         logger.exception("Ошибка проверки телефона")
-        await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
+        await _edit_or_answer(status, "❌ Сервис проверки недоступен, попробуйте позже.")
         return
 
     report = formatter.generate_self_check_report("📱 Телефон", phone, breaches)
-    await status.edit_text(report, parse_mode="Markdown", disable_web_page_preview=True)
+    await _edit_or_answer(status, report, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 @router.message(CheckStates.waiting_for_contact)
@@ -256,17 +271,18 @@ async def on_password(message: types.Message, state: FSMContext):
         count = await breach_checker.check_password(password)
     except Exception:
         logger.exception("Ошибка проверки пароля")
-        await status.edit_text("❌ Сервис проверки недоступен, попробуйте позже.")
+        await _edit_or_answer(status, "❌ Сервис проверки недоступен, попробуйте позже.")
         return
 
     if count > 0:
-        await status.edit_text(
+        await _edit_or_answer(
+            status,
             f"⚠️ Этот пароль встречался в утечках *{count}* раз(а).\n"
             "Срочно смените его и не используйте повторно.",
             parse_mode="Markdown",
         )
     else:
-        await status.edit_text("✅ Пароль не найден в известных утечках.")
+        await _edit_or_answer(status, "✅ Пароль не найден в известных утечках.")
 
 
 # ---------------------------- ПРОФИЛЬ ----------------------------
