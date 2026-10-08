@@ -10,12 +10,4 @@ pytz==2024.2
 cryptography==43.0.3
 
 # dev / тесты
-<<<<<<< Updated upstream
-<<<<<<< Updated upstream
 pytest==8.3.3
-=======
-pytest==8.3.3
->>>>>>> Stashed changes
-=======
-pytest==8.3.3
->>>>>>> Stashed changes
